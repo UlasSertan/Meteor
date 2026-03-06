@@ -48,8 +48,11 @@ def determine_common_size(files: list[str]) -> tuple[int, int]:
 
 
 def load_and_resize(path: str, target_size: tuple[int, int]) -> np.ndarray:
-    """Load a .tif, resize to target_size (width, height), return as float64 array."""
+    """Load a .tif, resize to target_size (width, height), return as float64 RGB array."""
     with Image.open(path) as img:
+        # Ensure all images are RGB so shapes are consistent
+        if img.mode != "RGB":
+            img = img.convert("RGB")
         if img.size != target_size:
             img = img.resize(target_size, Image.LANCZOS)
         return np.array(img, dtype=np.float64)
@@ -113,6 +116,35 @@ def subtract_background(
     max_val = gray_diff.max()
     if max_val > 0:
         gray_diff = (gray_diff / max_val) * 255.0
+
+    # Remove vertical column artifacts: subtract each column's mean.
+    # Grid remnants appear as uniform vertical stripes; the pen line is localized
+    # so the column mean is dominated by the grid, not the line.
+    col_p75 = np.percentile(gray_diff, 75, axis=0, keepdims=True)
+    gray_diff = np.clip(gray_diff - col_p75, 0, 255)
+    # Re-normalize after column subtraction
+    max_val_col = gray_diff.max()
+    if max_val_col > 0:
+        gray_diff = (gray_diff / max_val_col) * 255.0
+
+    # Remove low-level residual noise (grid remnants, paper texture).
+    # The pen line signal is typically >40, grid remnants are <25.
+    # Subtracting a constant kills the weak residuals, pen line survives.
+    noise_floor = 25.0
+    gray_diff = np.clip(gray_diff - noise_floor, 0, 255)
+    # Re-normalize so the pen line uses full range
+    max_val2 = gray_diff.max()
+    if max_val2 > 0:
+        gray_diff = (gray_diff / max_val2) * 255.0
+
+    # Contrast enhancement: boost pixels above mean, suppress pixels below.
+    # This makes the pen line pop and kills remaining faint column artifacts.
+    mean_val = gray_diff[gray_diff > 0].mean() if (gray_diff > 0).any() else 0
+    if mean_val > 0:
+        # Scale relative to mean: above mean gets amplified, below shrinks
+        contrast_strength = 2.0
+        gray_diff = mean_val + (gray_diff - mean_val) * contrast_strength
+        gray_diff = np.clip(gray_diff, 0, 255)
 
     # Invert: pen line becomes dark on white background (natural look)
     result = 255.0 - gray_diff
